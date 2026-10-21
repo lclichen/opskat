@@ -12,12 +12,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/opskat/opskat/internal/dbdriver"
+	dbregistry "github.com/opskat/opskat/internal/dbdriver"
 	"github.com/opskat/opskat/internal/dbdriver/dbdrivertest"
 	_ "github.com/opskat/opskat/internal/dbdriver/mysql"
 	"github.com/opskat/opskat/internal/model/entity/asset_entity"
 	"github.com/opskat/opskat/internal/pkg/socksdial/socksdialtest"
 	"github.com/opskat/opskat/internal/sshpool"
+	"github.com/opskat/opskat/pkg/dbdriver"
 )
 
 // 连接串、拨号接入、连接级只读、分页方言的断言都随代码迁到了各驱动包
@@ -42,7 +43,7 @@ func openWithFake(t *testing.T, asset *asset_entity.Asset, cfg *asset_entity.Dat
 func TestOpenDatabaseRejectsUnregisteredDriver(t *testing.T) {
 	_, err := OpenDatabase(context.Background(), &asset_entity.Asset{ID: 3},
 		&asset_entity.DatabaseConfig{Driver: "oracle", Host: "127.0.0.1", Port: 1521, Username: "u"}, "pw", nil)
-	require.ErrorIs(t, err, dbdriver.ErrDriverUnavailable)
+	require.ErrorIs(t, err, dbregistry.ErrDriverUnavailable)
 	assert.Contains(t, err.Error(), "oracle")
 }
 
@@ -247,4 +248,25 @@ func TestOpenDatabaseMySQLViaProxyRouted(t *testing.T) {
 			t.Fatal("目标服务未收到任何连接:代理分支未生效")
 		}
 	})
+}
+
+// 交给驱动的专属字段按驱动当前的声明整理：没存的取声明的默认值（表单清空了有默认值的字段、
+// 驱动升级新增了字段），声明里已经没有的键不交出去（驱动升级删了一个口令类字段，它的密文不该
+// 以普通取值的身份交给驱动）。
+func TestOpenDatabaseHandsTheDriverItsDeclaredOptions(t *testing.T) {
+	fake := dbdrivertest.NewFake()
+	fake.Desc.DriverFields = []dbdriver.DriverField{
+		{Key: "fetch_size", Type: dbdriver.FieldTypeNumber, Tab: dbdriver.TabAdvanced, Default: 100},
+		{Key: "region", Type: dbdriver.FieldTypeText, Tab: dbdriver.TabConnection},
+	}
+	dbdrivertest.Register(t, fake)
+
+	session, err := OpenDatabase(context.Background(), &asset_entity.Asset{ID: 3}, &asset_entity.DatabaseConfig{
+		Driver: fake.Desc.ID, Host: "10.0.0.5", Port: 7777,
+		DriverOptions: map[string]any{"region": "eu", "retired_token": "ciphertext"},
+	}, "pw", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.Close() })
+	req := session.(*dbdrivertest.FakeSession).Request
+	assert.Equal(t, map[string]any{"fetch_size": 100, "region": "eu"}, req.DriverOptions)
 }

@@ -105,7 +105,7 @@ func TestParseManifest(t *testing.T) {
 		})
 
 		Convey("should reject an hostABI newer than anything this runtime supports", func() {
-			for _, abi := range []string{"2.3", "3.0"} {
+			for _, abi := range []string{"2.4", "3.0"} {
 				data := []byte(`{"name": "x", "version": "1.0.0", "hostABI": "` + abi + `"}`)
 				_, err := ParseManifest(data)
 				So(err, ShouldNotBeNil)
@@ -267,6 +267,36 @@ func TestCapabilityChecks(t *testing.T) {
 		Convey("Tunnel — allow when declared", func() {
 			m := &Manifest{Capabilities: Capabilities{Tunnel: true}}
 			So(m.CheckTunnel(), ShouldBeNil)
+		})
+	})
+}
+
+func TestManifestDatabaseDriversABI(t *testing.T) {
+	manifest := func(abi string, ids string) []byte {
+		return []byte(`{"name":"x","version":"1.0.0","hostABI":"` + abi + `",` +
+			`"backend":{"runtime":"wasm","binary":"main.wasm"},` +
+			`"capabilities":{"databaseDrivers":` + ids + `}}`)
+	}
+	Convey("Declaring database drivers needs the 2.3 host ABI", t, func() {
+		Convey("2.3 declares them", func() {
+			m, err := ParseManifest(manifest("2.3", `["my-driver"]`))
+			So(err, ShouldBeNil)
+			So(m.Capabilities.DatabaseDrivers, ShouldResemble, []string{"my-driver"})
+		})
+		Convey("an extension built for an older ABI cannot declare them", func() {
+			for _, abi := range []string{"2.0", "2.1", "2.2"} {
+				_, err := ParseManifest(manifest(abi, `["my-driver"]`))
+				So(err, ShouldNotBeNil)
+				So(err.Error(), ShouldContainSubstring, "databaseDrivers")
+				So(err.Error(), ShouldContainSubstring, "2.3")
+			}
+		})
+		Convey("a driver id must be a plain name, once", func() {
+			_, err := ParseManifest(manifest("2.3", `["Bad Id"]`))
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "Bad Id")
+			_, err = ParseManifest(manifest("2.3", `["a","a"]`))
+			So(err, ShouldNotBeNil)
 		})
 	})
 }

@@ -48,13 +48,14 @@ Everything else — tools, asset types, policies, pages, display strings — is 
 ```
 
 `hostABI` is checked as an exact-set membership, not a minimum: `pkg/extension.SupportedHostABIs`
-currently accepts `2.0`, `2.1` and `2.2`, so an already-built `2.0` extension keeps loading
+currently accepts `2.0` through `2.3`, so an already-built `2.0` extension keeps loading
 unchanged (it just doesn't get `@opskat/host-ui` — see below), while one declaring
-anything not in that set (`2.3`, `3.0`, …) is refused at load with the list of what is
+anything not in that set (`2.4`, `3.0`, …) is refused at load with the list of what is
 supported. Declare `2.2` when a tool classifies with `.PolicyResources` or refuses
 arguments with `.RejectArgs` (see [The policy face](#the-policy-face)): an older app
 would read either reply as a call on no resource at all, so it must refuse the extension
-instead.
+instead. Declare `2.3` to provide a database driver (see
+[Providing a database driver](#providing-a-database-driver)).
 
 `capabilities` defaults to deny-all, and the notebook needs nothing: the host KV, the
 asset config and logging are available without a grant. Declare only what you use:
@@ -118,7 +119,10 @@ ciphertext, so "is it filled" checks work when editing.
 
 **An extension must declare at least one asset type**, and `Meta.PolicyType` must be
 set. Extension tools are reached through `exec` on an asset, so an extension without
-one has no reachable entry point and is refused at load.
+one has no reachable entry point and is refused at load. The one exception is an
+extension that only provides database drivers: its entry point is the user's database
+asset, so it needs no asset type and no policy type (one it declares is still
+checked), and it declares no tools.
 
 ### Schemas come from your Go types
 
@@ -475,6 +479,87 @@ A policy type belongs to one extension: loading a second extension that claims t
 policy type, or a group id that is already registered, is refused. The action set itself
 is never declared separately — the host derives it from the tools' `.Policy` actions
 and `.PolicyFunc` / `.PolicyResources` action sets.
+
+## Providing a database driver
+
+An extension can provide a driver for the `database` asset type — a SQL database the
+app has no built-in driver for. The driver contract is the public `pkg/dbdriver`, the
+same one the built-in drivers implement; how a driver is shaped (descriptor, form
+fields, capabilities, the session's operations) is in
+[docs/references/adding-a-database-driver.md](../docs/references/adding-a-database-driver.md#provided-by-an-extension).
+This section is what is different in an extension.
+
+The manifest declares the driver ids, which needs `hostABI` `2.3`; `describe()` must
+answer with exactly those drivers or the extension is refused at load:
+
+```json
+{
+  "name": "mydb-driver",
+  "version": "0.1.0",
+  "hostABI": "2.3",
+  "backend": { "runtime": "wasm", "binary": "main.wasm" },
+  "capabilities": { "databaseDrivers": ["mydb"] }
+}
+```
+
+The driver registers its descriptor and how a session connects with
+`sdkdbdriver.DatabaseDriver` (`pkg/extsdk/sdkdbdriver`). It is a package of its own:
+serving a driver links `database/sql` and `pkg/dbdriver/sqldb`, and an extension that
+does not import it carries neither. The SDK assembles the session from what `open`
+returns with `sqldb`, so the extension writes a `database/sql` driver (or embeds one
+compiled for `wasip1`) and the dialect, nothing else:
+
+```go
+opskat.Extension(opskat.Meta{Icon: "database", DisplayName: "extension.displayName"})
+sdkdbdriver.DatabaseDriver(dbdriver.Descriptor{
+    ID: "mydb", Name: "MyDB", Order: 500, Aliases: []string{}, DefaultPort: 4000,
+    Form: []dbdriver.FormTabFields{{Tab: dbdriver.TabConnection, Fields: []dbdriver.FormField{
+        dbdriver.FieldHost, dbdriver.FieldPort, dbdriver.FieldUsername, dbdriver.FieldPassword, dbdriver.FieldDatabase,
+    }}},
+    Capabilities: []dbdriver.Capability{dbdriver.CapViewDDL},
+}, func(ctx context.Context, req dbdriver.OpenRequest) (*sql.DB, sqldb.Dialect, error) {
+    db := sql.OpenDB(newConnector(req)) // dials with req.Transport.Dial
+    if err := sqldb.Establish(ctx, db, nil); err != nil {
+        return nil, nil, err
+    }
+    return db, myDialect{}, nil
+})
+```
+
+- **`open` gets the config, the password and the reach path.** `req.Config` is the
+  asset's connection config without what the host keeps to itself (tunnel, proxies,
+  credential); `req.Password` is the decrypted password, handed over in this call only.
+  Every network connection must be made with `req.Transport.Dial`: the host dials it
+  along the asset's SSH tunnel or proxy chain. `open` returns once the database
+  answers; its error is shown to the user as the driver's error.
+- **The form is a network database's.** An extension driver is checked by the host's
+  network rules (host, port and username required), so its `Form` must declare
+  `FieldHost`, `FieldPort` and `FieldUsername` and none of the database-file fields
+  (`FieldSQLiteSource`, `FieldPath`, `FieldSSHAsset`); otherwise the extension is
+  refused when it registers, naming the driver.
+- **Declare exactly what the dialect implements.** The optional `sqldb` dialect
+  interfaces decide which session operations exist; a capability in the descriptor the
+  dialect does not implement offers the user an entry point that fails. A read-only
+  config is refused by the SDK unless the descriptor declares `CapReadOnly`, in which
+  case `open` must make the connection read-only.
+- **Fields of the driver's own go in `DriverFields`.** Each one declares its key, type,
+  tab, whether it is required and its default; the values are stored in the asset's
+  `driver_options` and reach `open` as `req.DriverOptions`, password fields decrypted.
+  `Label` and `Description` may be keys of your `locales/` files: the host shows them in
+  the user's language.
+- **A session lives in instances of its own.** The host runs each session on up to
+  three module instances dedicated to it — operations that overlap get one each, later
+  ones wait — and keeps each instance — the `*sql.DB`, its open connections, a cursor
+  half read — between calls, so later operations do not log in again and a whole-table
+  export reads one cursor over many calls. `open` runs once per instance (again for one
+  that replaces an instance discarded after a failure), so connection state such as a
+  current schema is not shared between a session's instances. Every operation and
+  result crosses the boundary as JSON ([`pkg/extension/driverwire`](../pkg/extension/driverwire));
+  fields are only ever added, and an extension ignores the ones it does not know.
+
+`pkg/extension/testdata/fixture-dbdriver` is a complete driver over an in-memory
+`database/sql` driver; the host's tests run the driver conformance suites against it
+through the boundary (`pkg/extension/driver_session_test.go`).
 
 ## SKILL.md and locales
 

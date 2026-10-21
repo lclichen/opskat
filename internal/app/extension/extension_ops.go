@@ -210,7 +210,7 @@ func (e *Extension) assetRef(extName string, assetID int64) (*extension.AssetRef
 	if assetID == 0 {
 		return nil, nil
 	}
-	_, asset, err := e.service.OwnedAsset(i18n.Ctx(e.ctx, e.lang.Lang()), extName, assetID)
+	_, asset, _, err := e.service.OwnedTypedAsset(i18n.Ctx(e.ctx, e.lang.Lang()), extName, assetID)
 	if err != nil {
 		return nil, err
 	}
@@ -406,4 +406,19 @@ func InstalledExtensionVersion(e *Extension, name string) (string, bool) {
 		return "", false
 	}
 	return info.Version, true
+}
+
+// InstalledExtensionDrivers returns the database driver ids the installed
+// extension named name declares, nil when it is not installed. `opsctl ext dev`
+// compares them with the incoming manifest to mark newly added drivers.
+func InstalledExtensionDrivers(e *Extension, name string) []string {
+	if e.service == nil {
+		return nil
+	}
+	info, err := e.service.GetDetail(name, e.lang.Lang())
+	if err != nil {
+		// GetDetail's only failure is "not installed".
+		return nil
+	}
+	return info.Manifest.Capabilities.DatabaseDrivers
 }

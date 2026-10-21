@@ -11,16 +11,18 @@ import (
 	"github.com/pkg/sftp"
 	"go.uber.org/zap"
 
-	"github.com/opskat/opskat/internal/dbdriver"
+	dbregistry "github.com/opskat/opskat/internal/dbdriver"
 	"github.com/opskat/opskat/internal/model/entity/asset_entity"
 	"github.com/opskat/opskat/internal/pkg/netdial"
+	"github.com/opskat/opskat/internal/service/credential_svc"
 	"github.com/opskat/opskat/internal/sshpool"
+	"github.com/opskat/opskat/pkg/dbdriver"
 )
 
 // OpenDatabase 经配置里的驱动打开一条数据库会话。
 //
 // 这里只做所有驱动共用的两件事：按 cfg.Driver 在注册表里找到驱动（没注册就返回点名该驱动
-// 的 dbdriver.ErrDriverUnavailable，不把它当成别的驱动去连），以及把直连 / SSH 隧道 /
+// 的 dbregistry.ErrDriverUnavailable，不把它当成别的驱动去连），以及把直连 / SSH 隧道 /
 // SOCKS5 代理 / 代理链解析成驱动可以直接用的传输层。连接怎么建、连接级只读怎么落实、
 // 连不上报什么错，都是驱动的事；返回的会话归调用方，用完 Close。
 //
@@ -48,7 +50,7 @@ func OpenDatabase(ctx context.Context, asset *asset_entity.Asset, cfg *asset_ent
 }
 
 func openDatabase(ctx context.Context, cfg *asset_entity.DatabaseConfig, password string, sshAssetID int64, sshPool *sshpool.Pool) (dbdriver.Session, error) {
-	driver, err := dbdriver.Lookup(cfg.Driver)
+	driver, err := dbregistry.Lookup(cfg.Driver)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +58,44 @@ func openDatabase(ctx context.Context, cfg *asset_entity.DatabaseConfig, passwor
 	if err != nil {
 		return nil, err
 	}
-	return driver.Open(ctx, dbdriver.OpenRequest{Config: cfg, Password: password, Transport: transport})
+	options, err := driverOptions(driver.Descriptor(), cfg.DriverOptions)
+	if err != nil {
+		return nil, err
+	}
+	return driver.Open(ctx, dbdriver.OpenRequest{
+		Config: cfg.DriverConfig(), Password: password, DriverOptions: options, Transport: transport,
+	})
+}
+
+// driverOptions 是交给驱动的专属字段取值，按驱动当前的声明整理：只交声明了的键（驱动升级删掉的
+// 键不交出去），没存的取声明的默认值，必填缺失则打不开；存着的口令类取值（credential_svc 加密）
+// 解密成明文，与口令一样只放进打开会话的请求。返回副本，不改资产配置。
+func driverOptions(desc dbdriver.Descriptor, stored map[string]any) (map[string]any, error) {
+	if len(desc.DriverFields) == 0 {
+		return nil, nil
+	}
+	declared := make(map[string]any, len(desc.DriverFields))
+	for _, f := range desc.DriverFields {
+		if v, ok := stored[f.Key]; ok {
+			declared[f.Key] = v
+		}
+	}
+	options, err := desc.CompleteDriverOptions(declared)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range desc.DriverFields {
+		encrypted, ok := options[f.Key].(string)
+		if f.Type != dbdriver.FieldTypePassword || !ok || encrypted == "" {
+			continue
+		}
+		plaintext, err := credential_svc.Default().Decrypt(encrypted)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt driver option %q: %w", f.Key, err)
+		}
+		options[f.Key] = plaintext
+	}
+	return options, nil
 }
 
 // databaseTransport 把配置解析成到达数据库的途径。网络连接的优先级：代理链 > SSH 隧道 >
