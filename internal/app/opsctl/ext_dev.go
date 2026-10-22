@@ -96,9 +96,9 @@ func (o *Opsctl) handleExtDevInstall(req approval.ApprovalRequest) approval.Appr
 
 	ctx := i18n.Ctx(o.ctx, o.lang.Lang())
 	installedVersion, overwrites := o.extDevInstaller.InstalledExtensionVersion(ctx, manifest.Name)
-	var installedDrivers []string
+	var installed extension.Capabilities
 	if overwrites {
-		installedDrivers = o.extDevInstaller.InstalledExtensionDrivers(ctx, manifest.Name)
+		installed = o.extDevInstaller.InstalledExtensionCapabilities(ctx, manifest.Name)
 	}
 	log = log.With(
 		zap.String("extension", manifest.Name),
@@ -117,7 +117,7 @@ func (o *Opsctl) handleExtDevInstall(req approval.ApprovalRequest) approval.Appr
 		resp := o.extDevApprove(approval.ApprovalRequest{
 			Type:    extDevApprovalType,
 			Command: sourceDir,
-			Detail:  extDevApprovalDetail(manifest, installedVersion, installedDrivers, overwrites, o.lang.Lang()),
+			Detail:  extDevApprovalDetail(manifest, installedVersion, installed, overwrites, o.lang.Lang()),
 		})
 		if !resp.Approved {
 			log.Info("extension dev install denied", zap.String("reason", resp.Reason))
@@ -140,7 +140,7 @@ func (o *Opsctl) handleExtDevInstall(req approval.ApprovalRequest) approval.Appr
 // extDevApprovalDetail 是弹窗里除来源目录之外的全部内容：用户据此判断要不要放行。
 // credentials: read 会把扩展资产里保存的每个密码以明文交给它，所以放在第一行醒目提示，
 // 而不是混在能力列表里。
-func extDevApprovalDetail(m *extension.Manifest, installedVersion string, installedDrivers []string, overwrites bool, lang string) string {
+func extDevApprovalDetail(m *extension.Manifest, installedVersion string, installed extension.Capabilities, overwrites bool, lang string) string {
 	var b strings.Builder
 	if m.Capabilities.Credentials == extension.CredentialAccessRead {
 		b.WriteString(i18n.Pick(lang,
@@ -149,8 +149,8 @@ func extDevApprovalDetail(m *extension.Manifest, installedVersion string, instal
 	}
 	if len(m.Capabilities.DatabaseDrivers) > 0 {
 		b.WriteString(i18n.Pick(lang,
-			"警告：databaseDrivers —— 使用这些驱动的数据库资产，其口令会以明文交给该扩展\n",
-			"WARNING: databaseDrivers — database assets using these drivers hand their passwords to this extension in plaintext\n"))
+			"警告：databaseDrivers —— 使用这些驱动的数据库资产，其口令与 TLS 客户端私钥会以明文交给该扩展\n",
+			"WARNING: databaseDrivers — database assets using these drivers hand their passwords and TLS client private keys to this extension in plaintext\n"))
 	}
 	fmt.Fprintf(&b, "extension: %s %s\n", m.Name, m.Version)
 	if overwrites {
@@ -183,12 +183,22 @@ func extDevApprovalDetail(m *extension.Manifest, installedVersion string, instal
 	if c.Network.AssetEndpoint {
 		capLine("network.assetEndpoint", "true")
 	}
+	if c.Network.DatabaseRedirects {
+		v := "true"
+		if overwrites && !installed.Network.DatabaseRedirects {
+			v += " (" + i18n.Pick(lang, "新增", "new") + ")"
+		}
+		v += i18n.Pick(lang,
+			" —— 驱动可以连到数据库重定向到的其他地址，经资产的到达途径",
+			" — the driver may connect to other addresses the database redirects to, through the asset's route")
+		capLine("network.databaseRedirects", v)
+	}
 	if len(c.DatabaseDrivers) > 0 {
 		mark := i18n.Pick(lang, "新增", "new")
 		ids := make([]string, len(c.DatabaseDrivers))
 		for i, id := range c.DatabaseDrivers {
 			ids[i] = id
-			if overwrites && !slices.Contains(installedDrivers, id) {
+			if overwrites && !slices.Contains(installed.DatabaseDrivers, id) {
 				ids[i] += " (" + mark + ")"
 			}
 		}

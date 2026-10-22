@@ -48,14 +48,16 @@ Everything else — tools, asset types, policies, pages, display strings — is 
 ```
 
 `hostABI` is checked as an exact-set membership, not a minimum: `pkg/extension.SupportedHostABIs`
-currently accepts `2.0` through `2.3`, so an already-built `2.0` extension keeps loading
+currently accepts `2.0` through `2.4`, so an already-built `2.0` extension keeps loading
 unchanged (it just doesn't get `@opskat/host-ui` — see below), while one declaring
-anything not in that set (`2.4`, `3.0`, …) is refused at load with the list of what is
+anything not in that set (`2.5`, `3.0`, …) is refused at load with the list of what is
 supported. Declare `2.2` when a tool classifies with `.PolicyResources` or refuses
 arguments with `.RejectArgs` (see [The policy face](#the-policy-face)): an older app
 would read either reply as a call on no resource at all, so it must refuse the extension
 instead. Declare `2.3` to provide a database driver (see
-[Providing a database driver](#providing-a-database-driver)).
+[Providing a database driver](#providing-a-database-driver)). Declare `2.4` for
+`network.databaseRedirects` or the certificate field group: an older app would ignore
+them, so it must refuse the extension instead.
 
 `capabilities` defaults to deny-all, and the notebook needs nothing: the host KV, the
 asset config and logging are available without a grant. Declare only what you use:
@@ -82,7 +84,11 @@ included, since the user typed them. The target's scheme, host and port must mat
 an endpoint field (a bare `host:port` admits http and https); anything else, a
 redirect off the endpoints included, is refused with "not an endpoint of the asset".
 Declaring it also puts TCP under that rule; without it TCP is ungated and HTTP reach
-is the static allowlist alone.
+is the static allowlist alone. `network.databaseRedirects` is for database-driver
+extensions: it lets the driver follow a redirect the database answers with (a cluster
+node, a replica) by dialing that other address through the asset's own route. It needs
+`capabilities.databaseDrivers` and `hostABI` `2.4`; otherwise the extension fails to
+load with the reason named. The install confirm lists it as a capability.
 
 **Everything else is answered by the module itself**, through `describe()`. You never
 write that answer: the SDK derives it from the registration calls, so the host's view
@@ -532,6 +538,30 @@ sdkdbdriver.DatabaseDriver(dbdriver.Descriptor{
   Every network connection must be made with `req.Transport.Dial`: the host dials it
   along the asset's SSH tunnel or proxy chain. `open` returns once the database
   answers; its error is shown to the user as the driver's error.
+- **The driver reaches the asset's `host:port`, and redirects only when declared.**
+  Without `network.databaseRedirects` the host dials only the asset's own `host:port`;
+  any other address fails naming it and saying the extension does not declare following
+  database redirects. With it, any other `host:port` (a cluster node, a replica, a
+  routed listener the database answers with) is dialed along the asset's route —
+  direct, SSH tunnel, proxy or proxy chain — to that address itself: through a tunnel,
+  proxy or chain the name resolves at the far end, directly it resolves on the user's
+  machine, and then a loopback (`127.0.0.0/8`, `::1`, `localhost`), unspecified
+  (`0.0.0.0`, `::`) or link-local target is refused unless the asset's own address is one. The first dial of each such
+  address in a session is logged (extension, driver, asset, address); one the route
+  cannot reach fails with the route's error naming the address.
+- **Certificate TLS is the driver's own.** Declare `dbdriver.FieldTLSCert` on the
+  `TabTLS` tab (not together with `FieldTLS`; needs `hostABI` `2.4`) and the asset form
+  shows the same certificate fields as a Redis asset: enable TLS, skip verification,
+  server name, and the CA certificate, client certificate and client key, each a file
+  path or pasted content. When the asset has TLS on, `open` gets them as `req.TLS`
+  (`*dbdriver.TLSMaterial`): `Insecure`, `ServerName` and the `CA` / `Cert` / `Key`
+  contents — paths already read by the process opening the session, the key decrypted —
+  handed over like the password, only in this call; with TLS off `req.TLS` is `nil`.
+  The driver builds its own `tls.Config` from them (its database library may start or
+  redo TLS mid-protocol); the host never wraps the connection in TLS. A file that cannot
+  be read or a key that does not decrypt fails the open naming the field; invalid
+  contents or a failed handshake are the driver's own TLS error, never a fallback to
+  plaintext or to no verification.
 - **The form is a network database's.** An extension driver is checked by the host's
   network rules (host, port and username required), so its `Form` must declare
   `FieldHost`, `FieldPort` and `FieldUsername` and none of the database-file fields

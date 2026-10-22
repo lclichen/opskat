@@ -38,6 +38,26 @@ type OpenRequest struct {
 	DriverOptions map[string]any
 	// Transport 是共享代码解析好的「怎么到达数据库」。
 	Transport Transport
+	// AssetID 是这条会话所属的数据库资产，只用来在宿主的日志里点名资产；驱动不靠它连接。
+	AssetID int64
+	// TLS 是资产的证书 TLS 设置：只在驱动声明了证书字段组（FieldTLSCert）且资产启用了 TLS
+	// 时给出，否则为 nil（内置驱动不声明，始终为 nil，照旧按 Config.TLS / SSLMode 处理）。
+	// 内容与 Password 一样只在打开会话时给出，不进日志。
+	TLS *TLSMaterial
+}
+
+// TLSMaterial 是驱动自己完成 TLS 所需的设置与证书内容。填的是路径的，打开会话的进程已读成
+// 内容；私钥已解密。内容原样交出（通常是 PEM），合不合法由驱动的 TLS 判定。没填的项为空。
+type TLSMaterial struct {
+	// Insecure 要求跳过服务器证书校验。
+	Insecure bool `json:"insecure,omitempty"`
+	// ServerName 是校验证书与 SNI 用的服务器名；为空时由驱动按它连接的主机名取。
+	ServerName string `json:"serverName,omitempty"`
+	// CA 是校验服务器证书的 CA 证书；为空时用系统的信任根。
+	CA []byte `json:"ca,omitempty"`
+	// Cert / Key 是双向 TLS 的客户端证书与（明文）私钥。
+	Cert []byte `json:"cert,omitempty"`
+	Key  []byte `json:"key,omitempty"`
 }
 
 // Transport 是到达数据库的途径。隧道、代理、代理链的配置解析与凭据解密都在共享代码里
@@ -46,6 +66,12 @@ type Transport struct {
 	// Dial 非 nil 时，驱动到数据库的每一条网络连接都必须经它建立（SSH 隧道、SOCKS5 代理、
 	// 代理链，或直连 .local 主机时绕过 mDNS 的拨号器）。为 nil 表示直连，用驱动自己的默认拨号。
 	Dial DialFunc
+	// DialAddr 经同一途径按请求的地址拨号：与 Dial 不同，经 SSH 隧道时连到 addr 本身，而不是固定
+	// 连资产的地址；经隧道、代理或代理链时主机名在远端解析。给跟随数据库重定向（集群节点、只读
+	// 副本、路由的监听器）的扩展驱动用；内置驱动只用 Dial。为 nil 表示直连，用本机的统一拨号。
+	DialAddr DialFunc
+	// Direct 表示途径是直连：主机名在本机解析，没有隧道、代理或代理链。
+	Direct bool
 	// RemoteFS 非 nil 表示配置了一台 SSH 主机：数据库是那台主机上的文件的驱动（远端 SQLite）
 	// 经它打开主机的文件系统。按网络连接的驱动不用它。调用一次占用一条 SSH 连接，由返回值的
 	// Close 归还。
