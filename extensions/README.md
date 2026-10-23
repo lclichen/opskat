@@ -48,16 +48,18 @@ Everything else — tools, asset types, policies, pages, display strings — is 
 ```
 
 `hostABI` is checked as an exact-set membership, not a minimum: `pkg/extension.SupportedHostABIs`
-currently accepts `2.0` through `2.4`, so an already-built `2.0` extension keeps loading
+currently accepts `2.0` through `2.5`, so an already-built `2.0` extension keeps loading
 unchanged (it just doesn't get `@opskat/host-ui` — see below), while one declaring
-anything not in that set (`2.5`, `3.0`, …) is refused at load with the list of what is
+anything not in that set (`2.6`, `3.0`, …) is refused at load with the list of what is
 supported. Declare `2.2` when a tool classifies with `.PolicyResources` or refuses
 arguments with `.RejectArgs` (see [The policy face](#the-policy-face)): an older app
 would read either reply as a call on no resource at all, so it must refuse the extension
 instead. Declare `2.3` to provide a database driver (see
 [Providing a database driver](#providing-a-database-driver)). Declare `2.4` for
 `network.databaseRedirects` or the certificate field group: an older app would ignore
-them, so it must refuse the extension instead.
+them, so it must refuse the extension instead. Declare `2.5` for
+`capabilities.databaseKerberos` or a driver that splits and classifies statements
+(`dbdriver.CapClassifyStatements`), for the same reason.
 
 `capabilities` defaults to deny-all, and the notebook needs nothing: the host KV, the
 asset config and logging are available without a grant. Declare only what you use:
@@ -89,6 +91,10 @@ extensions: it lets the driver follow a redirect the database answers with (a cl
 node, a replica) by dialing that other address through the asset's own route. It needs
 `capabilities.databaseDrivers` and `hostABI` `2.4`; otherwise the extension fails to
 load with the reason named. The install confirm lists it as a capability.
+`capabilities.databaseKerberos` (a top-level boolean, not under `network`) declares that
+the driver may log in with Kerberos tickets the host fetches with the asset's Kerberos
+credentials. It likewise needs `capabilities.databaseDrivers` and `hostABI` `2.5`, and
+the install confirm and `opsctl ext dev` list it, marked new when an upgrade adds it.
 
 **Everything else is answered by the module itself**, through `describe()`. You never
 write that answer: the SDK derives it from the registration calls, so the host's view
@@ -562,8 +568,44 @@ sdkdbdriver.DatabaseDriver(dbdriver.Descriptor{
   be read or a key that does not decrypt fails the open naming the field; invalid
   contents or a failed handshake are the driver's own TLS error, never a fallback to
   plaintext or to no verification.
+- **Kerberos tickets come from the host.** Declare `dbdriver.FieldKerberos` on the
+  `TabConnection` tab (the manifest must declare `capabilities.databaseKerberos`, which
+  needs `hostABI` `2.5`; otherwise the extension is refused at load, naming the driver)
+  and the asset form offers an authentication method: password or Kerberos. When the
+  asset uses Kerberos, `open` gets `req.Kerberos`, `req.Config.AuthMethod` set to
+  `dbdriver.AuthMethodKerberos` and an empty `req.Password`; the username is handed over
+  as usual (the user may leave it empty under Kerberos), the Kerberos password, keytab
+  and keys never are.
+  In the login handshake, call `req.Kerberos.Ticket(ctx, dbdriver.KerberosSPN(service,
+  host))` with the service and host names the database sent (go-ora's
+  `Authenticate(server, service)`), and write the bytes it returns — the Kerberos
+  AP-REQ — into the handshake as they are; `opskat.KerberosTicket(spn)` is the same
+  call. The host fetches the ticket with the asset's Kerberos credentials and refuses,
+  with the reason, a request from outside a driver session or for an asset that does
+  not use Kerberos, a name that is not `service/host` (neither may contain `/` or
+  `@`), and a service principal other than the one the asset pins (naming both). A
+  failed ticket fails the login with the host's reason; nothing falls back to the
+  password. The first ticket for each service principal in a session is logged
+  (extension, driver, asset, principal, service principal), never a credential or a
+  ticket. In tests, `opskat.WithKerberosTickets` gives a `TestHost` a ticket source.
+- **The driver can split and classify SQL itself.** Declare
+  `dbdriver.CapClassifyStatements` (needs `hostABI` `2.5`; otherwise the extension is
+  refused at load, naming the driver) and pass
+  `sdkdbdriver.WithStatementClassifier(classify)` to `DatabaseDriver` — one without the
+  other panics at init. `classify(ctx, sql)` returns each statement of the text as a
+  `dbdriver.Statement`: byte offsets `Start` / `End` into the input, `Text`, an
+  uppercase `Type`, and `Dangerous` with a `Reason` from `dbdriver.DangerReasons()`. It
+  must not touch the database: the host calls it outside any session. The AI / opsctl
+  permission check and the query panel then go by these statements instead of the
+  host's own SQL parsing. Use the host's type names (`SELECT`, `UPDATE`, `DROP TABLE`,
+  ...) only for the same kind of statement and a name of your own (`MERGE`, a PL/SQL
+  block) otherwise. The host checks the answer — offsets inside the input, in order and
+  not overlapping, type uppercase, a known reason only on a dangerous statement — and
+  treats one breaking a rule, like an error `classify` returns for text it cannot split,
+  as SQL it cannot split, naming the driver and the reason.
 - **The form is a network database's.** An extension driver is checked by the host's
-  network rules (host, port and username required), so its `Form` must declare
+  network rules (host and port required, and a username unless the asset logs in with
+  Kerberos), so its `Form` must declare
   `FieldHost`, `FieldPort` and `FieldUsername` and none of the database-file fields
   (`FieldSQLiteSource`, `FieldPath`, `FieldSSHAsset`); otherwise the extension is
   refused when it registers, naming the driver.

@@ -23,7 +23,9 @@ Use `scope` to override the default database for this call, e.g. `scope: "analyt
 - Reads (`SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN`) return rows as JSON;
   writes return an affected-row count.
 - Multi-statement input is split and each statement is policy-checked
-  separately, so a read cannot smuggle a write past approval.
+  separately, so a read cannot smuggle a write past approval. Drivers may
+  report their own statement types (e.g. `MERGE`); a type missing from the
+  allow list needs confirmation unless the list contains `*`.
 - Credentials are resolved automatically; never ask the user for a password.
 
 ## Asset config (for put_asset)
@@ -33,7 +35,7 @@ Use `scope` to override the default database for this call, e.g. `scope: "analyt
 | `driver` | string | yes | `"mysql"`, `"postgresql"`, `"mssql"`, or `"sqlite"` |
 | `host` | string | non-SQLite | Hostname or IP |
 | `port` | number | no | Defaults by driver: 3306 / 5432 / 1433 |
-| `username` | string | non-SQLite | Database account name |
+| `username` | string | non-SQLite | Database account name; may be left empty under Kerberos (`auth_method: "kerberos"`) |
 | `password` | string | no | **Write-only.** For non-SQLite, encrypted in the asset; does not create a credential |
 | `credential_id` | number | no | Existing managed password credential ID; rejected for SQLite |
 | `database` | string | no | Default database |
@@ -53,6 +55,12 @@ Use `scope` to override the default database for this call, e.g. `scope: "analyt
 | `tls_cert_pem` | string | no | Client certificate as PEM content (mTLS) |
 | `tls_key_file` | string | no | Path to a client key file (mTLS) |
 | `tls_key_pem` | string | no | **Write-only.** Client key as PEM content (mTLS), encrypted in the asset; shown only as set (`tls_key_pem_set`) when the asset is viewed |
+| `auth_method` | string | no | `""` (password, default) or `"kerberos"`. The Kerberos keys (`auth_method` and `krb_*`) are only accepted by drivers that declare the Kerberos field group; any other driver rejects them naming the keys |
+| `krb_principal` | string | Kerberos | Principal as `user@REALM`; the realm is taken from it |
+| `krb_password` | string | no | **Write-only.** Principal password, encrypted in the asset; shown only as set (`krb_password_set`) when the asset is viewed. Under Kerberos the asset `password` is not needed |
+| `krb_keytab_file` | string | no | Path to a keytab file (only the path is stored); used instead of `krb_password` when set |
+| `krb_kdc` | string | Kerberos | One or more KDC addresses, comma-separated `host[:port]` (default port 88) |
+| `krb_spn` | string | no | Pin the service principal `service/host[@REALM]`; empty lets the driver choose |
 
 For non-SQLite drivers, `password` and `credential_id` are mutually exclusive. Plaintext is
 write-only, encrypted in the asset, and never creates a managed credential. SQLite accepts

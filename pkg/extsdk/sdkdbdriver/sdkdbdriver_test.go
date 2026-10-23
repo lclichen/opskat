@@ -11,6 +11,7 @@ import (
 
 	"github.com/opskat/opskat/pkg/dbdriver"
 	"github.com/opskat/opskat/pkg/dbdriver/sqldb"
+	opskat "github.com/opskat/opskat/pkg/extsdk"
 )
 
 var demoDriver = dbdriver.Descriptor{
@@ -60,6 +61,46 @@ func TestDatabaseDriverRegistrationRejectsBrokenDeclarations(t *testing.T) {
 	})
 }
 
+func TestDatabaseDriverStatementClassifierMatchesItsDeclaration(t *testing.T) {
+	open := func(context.Context, dbdriver.OpenRequest) (*sql.DB, sqldb.Dialect, error) { return nil, nil, nil }
+	classify := func(_ context.Context, sql string) ([]dbdriver.Statement, error) {
+		return []dbdriver.Statement{{Start: 0, End: len(sql), Text: sql, Type: "SELECT"}}, nil
+	}
+	splitting := demoDriver
+	splitting.Capabilities = []dbdriver.Capability{dbdriver.CapClassifyStatements}
+
+	Convey("a classifier and the capability declaring it come together, or registration fails at init", t, func() {
+		resetDrivers()
+		So(func() { DatabaseDriver(splitting, open) }, ShouldPanic)
+		So(func() { DatabaseDriver(demoDriver, open, WithStatementClassifier(classify)) }, ShouldPanic)
+		So(func() { DatabaseDriver(splitting, open, WithStatementClassifier(nil)) }, ShouldPanic)
+	})
+
+	Convey("the host asks the driver to split SQL without a session", t, func() {
+		resetDrivers()
+		DatabaseDriver(splitting, open, WithStatementClassifier(classify))
+
+		reply := callDriver(t, `{"op":"classifyStatements","args":{"driver":"demodb","statement":"SELECT 1"}}`)
+		So(reply.Error, ShouldBeNil)
+		var stmts []dbdriver.Statement
+		So(json.Unmarshal(reply.Result, &stmts), ShouldBeNil)
+		So(stmts, ShouldResemble, []dbdriver.Statement{{Start: 0, End: 8, Text: "SELECT 1", Type: "SELECT"}})
+
+		Convey("a driver without a classifier refuses as unsupported", func() {
+			DatabaseDriver(dbdriver.Descriptor{ID: "plaindb"}, open)
+			reply := callDriver(t, `{"op":"classifyStatements","args":{"driver":"plaindb","statement":"SELECT 1"}}`)
+			So(reply.Error, ShouldNotBeNil)
+			So(reply.Error.Code, ShouldEqual, "unsupported")
+			So(reply.Error.Message, ShouldContainSubstring, "plaindb")
+		})
+		Convey("a driver the extension does not register is an error", func() {
+			reply := callDriver(t, `{"op":"classifyStatements","args":{"driver":"otherdb","statement":"SELECT 1"}}`)
+			So(reply.Error, ShouldNotBeNil)
+			So(reply.Error.Message, ShouldContainSubstring, "otherdb")
+		})
+	})
+}
+
 func TestDatabaseDriverServesSessionsOverJSON(t *testing.T) {
 	Convey("the host opens a session and runs operations on it as JSON", t, func() {
 		resetDrivers()
@@ -104,6 +145,25 @@ func TestDatabaseDriverServesSessionsOverJSON(t *testing.T) {
 			So(reply.Error, ShouldNotBeNil)
 			So(reply.Error.Code, ShouldEqual, "unsupported")
 			So(reply.Error.Message, ShouldContainSubstring, dbdriver.ErrUnsupported.Error())
+		})
+
+		Convey("a Kerberos asset's open carries a ticket source that asks the host, and a password asset's none", func() {
+			host := opskat.NewTestHost(opskat.WithKerberosTickets(func(spn string) ([]byte, error) {
+				return []byte("ticket:" + spn), nil
+			}))
+			defer host.Close()
+
+			reply := callDriver(t, `{"op":"open","args":{"driver":"demodb","config":{"driver":"demodb","host":"db.internal"},"kerberos":true}}`)
+			So(reply.Error, ShouldBeNil)
+			So(opened.Kerberos, ShouldNotBeNil)
+			So(opened.Kerberos.Principal, ShouldBeEmpty)
+			ticket, err := opened.Kerberos.Ticket(context.Background(), dbdriver.KerberosSPN("demodb", "db.internal"))
+			So(err, ShouldBeNil)
+			So(string(ticket), ShouldEqual, "ticket:demodb/db.internal")
+
+			reply = callDriver(t, `{"op":"open","args":{"driver":"demodb","config":{"driver":"demodb"},"password":"s3cret"}}`)
+			So(reply.Error, ShouldBeNil)
+			So(opened.Kerberos, ShouldBeNil)
 		})
 
 		Convey("a read-only config is refused before the opener runs when the driver does not declare it", func() {
