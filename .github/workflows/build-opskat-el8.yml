@@ -1,0 +1,67 @@
+name: Build OpsKat RPM for Rocky Linux 8
+
+# 上游只提供 Ubuntu 22.04 上编译的 .deb，二进制引用 GLIBC_2.34；
+# Rocky/RHEL 8 是 glibc 2.28，直接装 deb（或 alien 转 rpm）都跑不起来。
+# 这里把编译放进 rockylinux:8 容器，产物原生依赖 glibc 2.28，并打成 RPM。
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "opskat 的 tag 或分支（建议用 release tag）"
+        required: true
+        default: "v1.14.0"
+      make_rpm:
+        description: "生成 RPM（关闭则只生成便携 tar.gz）"
+        type: boolean
+        default: true
+      image:
+        description: "构建容器镜像（Docker Hub 限流时可换 quay.io/rockylinux/rockylinux:8）"
+        required: false
+        default: "rockylinux:8"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout build files
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Build inside Rocky Linux 8
+        env:
+          REF: ${{ inputs.ref }}
+          MAKE_RPM: ${{ inputs.make_rpm }}
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          test -f ci/build-opskat-el8.sh || {
+            echo "缺少 ci/build-opskat-el8.sh；请把构建脚本和本 workflow 一起提交" >&2
+            exit 1
+          }
+          mkdir -p out
+          docker run --rm -i \
+            --volume "$PWD/out:/out" \
+            --volume "$PWD/ci:/ci:ro" \
+            --env REF="$REF" \
+            --env MAKE_RPM="$MAKE_RPM" \
+            "$IMAGE" \
+            bash /ci/build-opskat-el8.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: opskat-el8
+          path: |
+            out/*.rpm
+            out/*.tar.gz
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
